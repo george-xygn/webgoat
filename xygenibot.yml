@@ -86,7 +86,7 @@ sast:
     anthropic:
       host: ${ANTHROPIC_HOST:-https://api.anthropic.com/v1}
       token: ${ANTHROPIC_TOKEN}
-      model: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+      model: ${ANTHROPIC_MODEL:-claude-opus-4-8}
 
     gemini:
       host: ${GEMINI_HOST:-https://generativelanguage.googleapis.com/v1beta}
@@ -96,17 +96,17 @@ sast:
     groq:
       host: ${GROQ_HOST:-https://api.groq.com/openai/v1}
       token: ${GROQ_TOKEN}
-      model: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      model: ${GROQ_MODEL:-openai/gpt-oss-120b}
 
     openai:
       host: ${OPENAI_HOST:-https://api.openai.com/v1}
       token: ${OPENAI_TOKEN}
-      model: ${OPENAI_MODEL:-gpt-4o}
+      model: ${OPENAI_MODEL:-gpt-5.3-codex}
 
     openrouter:
       host: ${OPENROUTER_HOST:-https://openrouter.ai/api/v1}
       token: ${OPENROUTER_TOKEN}
-      model: ${OPENROUTER_MODEL:-openai/gpt-4o}
+      model: ${OPENROUTER_MODEL:-openai/gpt-5.3-codex}
 
   # This property sets the AI agent to be used. One of the available within ai-agents.
   # Use global to use the integration configured into your account if any; Else it defaults to xygeni
