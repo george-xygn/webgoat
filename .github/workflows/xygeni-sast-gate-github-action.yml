@@ -1,0 +1,246 @@
+###############################################################################
+# Xygeni SAST Gate - GitHub Actions, using the Xygeni Action (xygeni-action)
+#
+# Place this file at: .github/workflows/xygeni-sast-gate.yml
+#
+# STATUS: the inputs used below are the documented ones. Unlike the Azure task,
+#   the Action publishes a complete input schema (token, command, gh_token,
+#   xygeni_url, xygeni_dashboard_url) and nothing else is invented here. The
+#   only thing to confirm before sharing with a customer is the action version
+#   tag (see PIN THE ACTION below).
+#
+# WHY THE GATE WORKS HERE (and why this is the better PoC artifact)
+#   The Action is a thin wrapper: it downloads the scanner and runs one CLI
+#   command, which you control through the 'command' input. Everything the CLI
+#   can do, this workflow can express, including the guardrail reference.
+#
+#   The default value of 'command' is:  scan --never-fail
+#   That default exists so an unconfigured scan never breaks someone's build.
+#   It is also exactly what prevents gating. The moment you set 'command'
+#   yourself and omit --never-fail, the scanner's exit code reaches the step,
+#   and a non-zero exit fails the job. That is the whole mechanism.
+#
+#   Contrast with the Azure task version (xygeni-sast-gate-azure-task.yml),
+#   where exit-code handling happens inside the task and cannot be guaranteed
+#   from YAML. On GitHub the exit code is ours, so this workflow gates by
+#   construction, not by hope.
+#
+# THE THREE PIECES (same model as Azure, worth repeating to the customer)
+#   PROJECT   identified by name; the link to the policy. Set with -n.
+#             Without -n the project name defaults to GITHUB_REPOSITORY.
+#   POLICY    decides WHAT IS REPORTED and at what severity. Configured on the
+#             platform, never referenced from the workflow. A new project
+#             inherits the policy tagged "Default".
+#   GUARDRAIL decides WHAT BLOCKS, via its @exitcode(...) action, referenced
+#             from the CLI with --fail-on="#GuardrailName".
+#   The policy runs first. If it reports nothing at critical severity, the
+#   guardrail has nothing to match and the build passes green even though the
+#   gate is configured correctly. Verify the policy before suspecting the
+#   guardrail.
+#
+# PREREQUISITES
+#   1. Encrypted secret XYGENI_TOKEN, at repository, environment or
+#      organization scope. Generated via Profile >> Generate Xygeni API Token
+#      for Scanner. The token needs upload permissions to the platform.
+#        gh secret set XYGENI_TOKEN
+#        gh secret set --org ORG_NAME XYGENI_TOKEN --visibility all
+#   2. Guardrail CI_SAST_Critical on the platform with action @exitcode(135).
+#   3. Nothing else. No JDK step, no install step: the Action handles the
+#      scanner runtime.
+#
+# PIN THE ACTION
+#   The documentation shows the version both as @5.38.0 and as @v5.38.0 in two
+#   different examples. The repository publishes v-prefixed tags (v5 is the
+#   moving major tag), so @v5.38.0 is used below. Confirm against
+#   https://github.com/xygeni/xygeni-action/releases before handing this to a
+#   customer, and for a hardened setup pin to the full commit SHA instead, as
+#   GitHub recommends for third-party actions.
+#
+# RECOMMENDED READING
+#   GitHub integration: https://docs.xygeni.io/xygeni-administration/platform-administration/integrations/integrate-scanner-cli-into-ci-cd-systems/github-actions-integration
+#   Guardrails:         https://docs.xygeni.io/xygeni-scanner-cli/xygeni-cli-overview/guardrails
+#   Scan command:       https://docs.xygeni.io/xygeni-scanner-cli/xygeni-cli-overview/xygeni-cli-operation-modes/single-scan
+#   Output formats:     https://docs.xygeni.io/xygeni-scanner-cli/xygeni-cli-overview/xygeni-cli-output-formats
+#   Token permissions:  https://docs.xygeni.io/xygeni-scanner-cli/xygeni-cli-overview/scm-ci-cd-and-container-registry-tokens
+#   Error codes:        https://docs.xygeni.io/xygeni-scanner-cli/xygeni-cli-overview/xygeni-cli-error-codes
+###############################################################################
+
+name: Xygeni SAST Gate
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+# workflow_dispatch only while validating, so the first runs are deliberate.
+# Once the gate behaves as expected, uncomment push and pull_request to gate
+# real branches. On GitHub, blocking a merge additionally requires marking this
+# check as required in Settings >> Branches >> branch protection rules: a red
+# check does not stop a merge on its own.
+# ---------------------------------------------------------------------------
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [ main, develop ]
+  # pull_request:
+  #   branches: [ main, develop ]
+
+# ---------------------------------------------------------------------------
+# PERMISSIONS
+# ---------------------------------------------------------------------------
+# Least privilege for a SAST-only scan: read the code, nothing more.
+# Widen this only if you add capabilities that write back to the repository
+# (commit statuses from a guardrail, Auto-fix pull requests, SARIF upload to
+# code scanning). Each of those needs its own scope, and misconfiguration or
+# compliance analysis needs a PAT rather than the default token.
+# ---------------------------------------------------------------------------
+permissions:
+  contents: read
+
+env:
+  # Project name on the platform: the link to the policy that decides what is
+  # reported and at what severity. Set explicitly so results do not land under
+  # the repository name, which is the default.
+  XYGENI_PROJECT: WebGoatGitHubCI
+
+jobs:
+  xygeni-sast-gate:
+    name: Xygeni SAST scan + guardrail gate
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------------------------------------
+      # STEP 1: Get the source code
+      # ---------------------------------------------------------------------
+      # SAST analyses source, so the code must be on the runner. The checkout
+      # lands in GITHUB_WORKSPACE, which is also the working directory of the
+      # following steps, so "-d ." in the scan command means "this repository".
+      #
+      #   fetch-depth: 0  the default shallow clone of 1 commit is not enough
+      #     for scans that need history (baseline comparison, @is_new()
+      #     guardrails, code tampering). The documentation calls this out
+      #     explicitly. It costs clone time on large repositories; keep it,
+      #     because a gate that silently loses baseline awareness is worse.
+      # ---------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------------
+      # STEP 2: Run the Xygeni Action
+      # ---------------------------------------------------------------------
+      # INPUTS, one by one (this is the full documented schema):
+      #
+      #   token          Xygeni API token. The only mandatory input.
+      #
+      #   command        The CLI command the Action executes. Default is
+      #                  'scan --never-fail'. Overriding it is what makes this
+      #                  a gate rather than an informational scan.
+      #
+      #   gh_token       GitHub token used to read repository and organization
+      #                  configuration. Defaults to GITHUB_TOKEN, which is
+      #                  sufficient for SAST, secrets and IaC. It is NOT
+      #                  sufficient for the misconfiguration and compliance
+      #                  checks: those need a PAT (secrets.GH_PAT) with the
+      #                  permissions listed in the token permissions doc. This
+      #                  workflow runs SAST only, so the default is left alone.
+      #
+      #   xygeni_url             Base URL of the Xygeni API. Default
+      #                          https://api.xygeni.io. Change it for
+      #                          on-premise or a dedicated tenant.
+      #   xygeni_dashboard_url   Default https://in.xygeni.io/dashboard. Same.
+      #
+      # THE COMMAND, piece by piece:
+      #
+      #   scan                    single-scan mode over one project.
+      #   -n $XYGENI_PROJECT      platform project name, so the right policy
+      #                           applies. Drop it and you inherit the repo
+      #                           name.
+      #   -d .                    scan the checked-out repository. Use a
+      #                           subdirectory (-d app) for a monorepo module.
+      #   --run=sast              SAST only. Without it the scan runs the full
+      #                           default set, which is a different
+      #                           conversation with the customer and a longer
+      #                           build. Other values: secrets, iac, deps,
+      #                           misconf, suspectdeps, inventory.
+      #   --fail-on="#CI_SAST_Critical"
+      #                           references the named guardrail on the
+      #                           platform. The '#' prefix is what marks it as
+      #                           a guardrail name rather than a severity.
+      #                           Severity form also works: --fail-on=critical.
+      #                           Several guardrails:
+      #                           --fail-on="#g1,#g2".
+      #   -o / -f json            write findings to a file so the next step can
+      #                           keep them as an artifact.
+      #
+      #   Note there is no --never-fail here. That is deliberate and it is the
+      #   single most important line in this file.
+      # ---------------------------------------------------------------------
+      - name: Xygeni SAST scan
+        id: xygeni-scan
+        uses: xygeni/xygeni-action@v5.38.0
+        with:
+          token: ${{ secrets.XYGENI_TOKEN }}
+          command: >-
+            scan
+            -n ${{ env.XYGENI_PROJECT }}
+            -d .
+            --run=sast
+            --fail-on="#CI_SAST_Critical"
+            -o xygeni-findings.json
+            -f json
+
+      # ---------------------------------------------------------------------
+      # STEP 3: Keep the findings as an artifact
+      # ---------------------------------------------------------------------
+      # if: always() is the point of this step. Without it, GitHub skips it
+      # whenever the previous step failed, which is precisely when the
+      # guardrail blocked the build and the findings are most worth having.
+      # (always() is the GitHub equivalent of Azure's succeededOrFailed().)
+      # ---------------------------------------------------------------------
+      - name: Publish Xygeni findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xygeni_findings
+          path: xygeni-findings.json
+          if-no-files-found: warn
+
+###############################################################################
+# WHAT TO CHECK ON THE FIRST RUN
+#
+#   1. Did the Action resolve?
+#      "Unable to resolve action xygeni/xygeni-action@v5.38.0" means the tag
+#      form is wrong. Try the version without the v prefix, or pin to @v5.
+#      This is the most likely first failure and the only schema-level risk in
+#      this file.
+#
+#   2. Was the scan restricted to SAST?
+#      The log should show a SAST analysis and nothing else. If SCA, secrets or
+#      IaC analyses appear, --run did not take effect.
+#
+#   3. Did the guardrail fire, and did the job fail?
+#      Look for a GUARDRAIL line and exit code 135. On GitHub the exit code
+#      propagates to the step, so a fired guardrail and a green job would be a
+#      genuine defect worth reporting, not a YAML problem.
+#      Reference: exit code 127 is set automatically when items are found and
+#      no when/else clause matched, which is a different situation from your
+#      guardrail's 135.
+#
+#   4. Which project did the results land under?
+#      Check the dashboard. The project name determines which policy applies.
+#      If findings run in the log but do not reach the platform, add --upload
+#      to the command and re-run: that is the switch that sends results to the
+#      service.
+#
+#   5. Is the check actually blocking?
+#      A failed workflow does not block a merge by itself. Add this workflow as
+#      a required status check in branch protection, otherwise you have a red
+#      cross that anyone can merge past.
+#
+# PoC TALKING POINT
+#   Show the customer the same gate on both platforms. On GitHub the guardrail
+#   exit code is handled by their own workflow, so the gate is auditable end to
+#   end from the YAML they own: no black box between the scanner's verdict and
+#   the build result. That is usually the question a DevSecOps lead is really
+#   asking when they ask "can it break the build".
+###############################################################################
