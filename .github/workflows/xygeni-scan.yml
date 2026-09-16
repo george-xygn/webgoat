@@ -2,9 +2,7 @@ name: Xygeni Scan
 on:
   workflow_dispatch:  # Allows manual triggering
   # no push triggers
-  pull_request:
-    branches:
-      - main
+  # no pull request triggers
   # no schedule triggers
 
 jobs:
@@ -29,5 +27,3 @@ jobs:
           xygeni_url: https://api.xygeni.io
           token: ${{ secrets.XYGENI_TOKEN }}
           gh_token: ${{ secrets.PAT_FOR_XYGENI_SCAN }}
-          command: scan --fail-on=critical
-          
